@@ -1,7 +1,4 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 API_ID = 21802065
 API_HASH = "2a8d929f6584561a32fc93e1f044652d"
