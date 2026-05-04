@@ -349,4 +349,4 @@ if __name__ == "__main__":
     try:
         LOOP.run_until_complete(main())
     finally:
-        LOOP.close(
+        LOOP.close()
