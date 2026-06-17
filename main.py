@@ -4,6 +4,7 @@ import os
 import re
 
 import yt_dlp
+from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pytgcalls import PyTgCalls, idle
@@ -334,10 +335,28 @@ async def on_call_update(_, update):
         logger.exception("on_call_update error")
 
 
+# --- Web server (Render يطلب فتح بورت حتى تُعتبر الخدمة شغالة) -------------
+async def handle_health(request):
+    return web.Response(text="Music bot is running.")
+
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    app.router.add_get("/health", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Web server listening on 0.0.0.0:{port}")
+
+
 # --- Main --------------------------------------------------------------------
 async def main():
     await bot.start()
     await call_py.start()
+    await run_web_server()
     me = await bot.get_me()
     logger.info(f"Bot started as @{me.username}")
     print(f"Bot started as @{me.username}", flush=True)
