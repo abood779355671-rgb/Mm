@@ -26,3 +26,9 @@ for _name, _val in (
 
 DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+# --- إعدادات الكاش والتحميل (اختيارية، قابلة للضبط من .env) -----------------
+# مدة بقاء ملفات downloads قبل اعتبارها قديمة وقابلة للحذف (بالساعات)
+CACHE_MAX_AGE_HOURS = int(os.environ.get("CACHE_MAX_AGE_HOURS", "24"))
+# الحد الأقصى للتحميلات الفعلية المتزامنة عبر yt-dlp
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "3"))
