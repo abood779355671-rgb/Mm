@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 
 import yt_dlp
 from aiohttp import web
@@ -17,6 +18,8 @@ from config import (
     BOT_TOKEN,
     SESSION_STRING,
     DOWNLOADS_DIR,
+    CACHE_MAX_AGE_HOURS,
+    MAX_CONCURRENT_DOWNLOADS,
 )
 
 logging.basicConfig(
@@ -57,6 +60,12 @@ call_py = PyTgCalls(userbot)
 # --- State -------------------------------------------------------------------
 queues: dict[int, list[dict]] = {}
 active_chats: dict[int, bool] = {}
+# كاش الأغاني: مفتاحه video_id (من yt-dlp)، قيمته بيانات الأغنية والملف + وقت الإضافة
+audio_cache: dict[str, dict] = {}      # video_id -> {"title", "duration", "path", "cached_at"}
+# فهرس ثانوي: استعلام مُطبّع (lowercase + strip) -> video_id
+query_index: dict[str, str] = {}
+# تحديد عدد التحميلات الفعلية المتزامنة عبر yt-dlp
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -71,7 +80,28 @@ async def fetch_audio(query: str) -> dict:
     1. If query is a URL (any site supported by yt-dlp) → use it directly.
        For YouTube URLs, use cookies.txt if present (YouTube blocks datacenter IPs).
     2. Otherwise → search SoundCloud (works without cookies on servers).
+
+    Caching:
+    - Before downloading, check query_index (normalized query → video_id) and
+      audio_cache (video_id → metadata). If the cached file still exists on disk,
+      return it immediately and skip yt-dlp entirely.
+    - After every successful download, update both audio_cache and query_index,
+      stamping the entry with cached_at so cleanup_downloads_loop can expire it.
+
+    Concurrency:
+    - Actual downloads are limited by DOWNLOAD_SEMAPHORE so that no more than
+      MAX_CONCURRENT_DOWNLOADS run at the same time. Cache hits bypass the limit.
     """
+    # تطبيع الاستعلام للبحث في الفهرس الثانوي
+    norm = query.strip().lower()
+
+    # فحص الكاش: إن وُجد video_id والملف لا يزال على القرص → إرجاع فوري (دون عدّاد التزامن)
+    cached_id = query_index.get(norm)
+    if cached_id and cached_id in audio_cache:
+        entry = audio_cache[cached_id]
+        if os.path.isfile(entry["path"]):
+            return {k: entry[k] for k in ("title", "duration", "path")}
+
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
     has_cookies = os.path.isfile(cookies_path)
 
@@ -83,13 +113,6 @@ async def fetch_audio(query: str) -> dict:
         "noplaylist": True,
         "geo_bypass": True,
         "nocheckcertificate": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
     }
     if has_cookies:
         base_opts["cookiefile"] = cookies_path
@@ -111,23 +134,46 @@ async def fetch_audio(query: str) -> dict:
             info = ydl.extract_info(t, download=True)
             if "entries" in info:
                 info = info["entries"][0]
-            file_path = os.path.join(DOWNLOADS_DIR, f"{info['id']}.mp3")
+            # الامتداد الحقيقي للملف المُحمَّل (webm/m4a/opus...) بدون transcode
+            file_path = ydl.prepare_filename(info)
             return {
+                "id": info["id"],
                 "title": info.get("title", "Unknown"),
                 "duration": info.get("duration", 0),
                 "path": file_path,
             }
 
-    try:
-        return await loop.run_in_executor(None, _run, base_opts, target)
-    except Exception as primary_err:
-        if is_url(query) and ("youtube" in query):
-            fallback_query = f"scsearch1:{query}"
-            try:
-                return await loop.run_in_executor(None, _run, base_opts, fallback_query)
-            except Exception:
-                pass
-        raise primary_err
+    def _cache_and_return(result: dict) -> dict:
+        """تحديث الكاش والفهرس الثانوي (مع طابع زمني) ثم تجريد الـ id قبل الإرجاع."""
+        vid = result["id"]
+        entry = {
+            "title": result["title"],
+            "duration": result["duration"],
+            "path": result["path"],
+            "cached_at": time.time(),
+        }
+        audio_cache[vid] = entry
+        query_index[norm] = vid
+        return {k: entry[k] for k in ("title", "duration", "path")}
+
+    # تحديد التزامن: لا يتجاوز عدد التحميلات الفعلية MAX_CONCURRENT_DOWNLOADS
+    async with DOWNLOAD_SEMAPHORE:
+        try:
+            return _cache_and_return(
+                await loop.run_in_executor(None, _run, base_opts, target)
+            )
+        except Exception as primary_err:
+            if is_url(query) and ("youtube" in query):
+                fallback_query = f"scsearch1:{query}"
+                try:
+                    return _cache_and_return(
+                        await loop.run_in_executor(
+                            None, _run, base_opts, fallback_query
+                        )
+                    )
+                except Exception:
+                    pass
+            raise primary_err
 
 
 async def play_song(chat_id: int, song: dict, message: Message):
@@ -159,6 +205,71 @@ async def play_next(chat_id: int, message: Message):
         return
     song = queues[chat_id][0]
     await play_song(chat_id, song, message)
+
+
+def _cached_paths() -> set[str]:
+    """مجموعة المسارات النشطة حالياً في الكاش (لتفادي حذفها أثناء التنظيف)."""
+    return {entry["path"] for entry in audio_cache.values()}
+
+
+async def cleanup_downloads_loop():
+    """تنظيف دوري لمجلد downloads كل ساعة.
+
+    الخطوة 1: إسقاط أي مدخل بالكاش (audio_cache/query_index) تجاوز عمره
+    CACHE_MAX_AGE_HOURS، وحذف ملفه من القرص فعلياً. بدون هذي الخطوة كانت
+    مدخلات الكاش تبقى للأبد، فتمنع أي حذف لاحق وتُبطل التنظيف بالكامل.
+
+    الخطوة 2: حذف أي ملف "يتيم" متبقٍ على القرص (غير مرتبط بأي مدخل كاش
+    حالي) وتجاوز عمره الحد المسموح — يغطي حالات نادرة كفشل جزئي أو ملفات
+    قديمة من قبل تفعيل الكاش.
+    """
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            max_age_seconds = CACHE_MAX_AGE_HOURS * 3600
+            now = time.time()
+
+            # 1) إسقاط مدخلات الكاش المنتهية وحذف ملفاتها
+            expired_ids = [
+                vid
+                for vid, entry in audio_cache.items()
+                if now - entry["cached_at"] > max_age_seconds
+            ]
+            for vid in expired_ids:
+                entry = audio_cache.pop(vid, None)
+                if entry:
+                    try:
+                        os.remove(entry["path"])
+                        logger.info(f"cleanup: expired cache entry removed ({vid})")
+                    except OSError:
+                        logger.warning(f"cleanup: failed to remove {entry['path']}")
+            if expired_ids:
+                stale_queries = [
+                    q for q, vid in query_index.items() if vid in expired_ids
+                ]
+                for q in stale_queries:
+                    query_index.pop(q, None)
+
+            # 2) حذف أي ملف يتيم على القرص لا يرتبط بمدخل كاش نشط حالياً
+            active_paths = _cached_paths()
+            for name in os.listdir(DOWNLOADS_DIR):
+                file_path = os.path.join(DOWNLOADS_DIR, name)
+                if not os.path.isfile(file_path):
+                    continue
+                if file_path in active_paths:
+                    continue
+                try:
+                    age = now - os.path.getmtime(file_path)
+                except OSError:
+                    continue
+                if age > max_age_seconds:
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"cleanup: removed orphan file {name}")
+                    except OSError:
+                        logger.warning(f"cleanup: failed to remove {name}")
+        except Exception:
+            logger.exception("cleanup_downloads_loop error")
 
 
 # --- Bot commands ------------------------------------------------------------
@@ -357,6 +468,8 @@ async def main():
     await bot.start()
     await call_py.start()
     await run_web_server()
+    # تشغيل مهمة التنظيف الدوري بالخلفية
+    asyncio.create_task(cleanup_downloads_loop())
     me = await bot.get_me()
     logger.info(f"Bot started as @{me.username}")
     print(f"Bot started as @{me.username}", flush=True)
