@@ -1,11 +1,28 @@
 import os
 
-API_ID = 21802065
-API_HASH = "2a8d929f6584561a32fc93e1f044652d"
-BOT_TOKEN = "8659720466:AAGUK8GD5fzsH6bC48sG7_6L-Eh46rZwVZc"
+from dotenv import load_dotenv
 
-SESSION_STRING = "BAFMrFEAo-4Rx5iQ2KxLxjTUv5_6yHADYL3aTuwuU-NgXGWlFrIFkbs6iPq9Y8Y3dJ8hTNROpMcElMEUFYnmxzdXz7_c4vH-thvdY4aF2F_6K02iuckUnRTttPG4RoHMphjc0U04FCBKhKKTfhTkSwEWM0TRQ8axvtfFVt_Hti3R2vbdRpUxiptkD9mEdb31ErVAWSPOso_VqCAnglDUvdEKwyPIhQn6sxRMAIjoLporDv0hiiH8YhHJGKYD9IOFPgPj3oaixV5TtToZTHBD14xojLRrcLRkH8sB2P84sht9sA7wc-_Fj4SKfryG-MKgRg9m7ysba1aprhaYxWghgSnlx3SSMgAAAAH_6HnKAA"
-OWNER_ID = 8588392906
+# يقرأ القيم من ملف .env عند التشغيل المحلي. على Render هذه السطر لا يفعل شيئاً
+# لأن المتغيرات يتم حقنها مباشرة من إعدادات الخدمة (Environment Variables).
+load_dotenv()
+
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+SESSION_STRING = os.environ.get("SESSION_STRING", "")
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+
+for _name, _val in (
+    ("API_ID", API_ID),
+    ("API_HASH", API_HASH),
+    ("BOT_TOKEN", BOT_TOKEN),
+    ("SESSION_STRING", SESSION_STRING),
+):
+    if not _val:
+        raise SystemExit(
+            f"المتغير {_name} غير موجود. عرّفه في ملف .env محلياً أو في "
+            f"Environment Variables على Render."
+        )
 
 DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
