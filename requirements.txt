@@ -1,0 +1,8 @@
+kurigram
+TgCrypto
+py-tgcalls==2.2.11
+yt-dlp
+python-dotenv
+aiofiles
+aiohttp
+redis
